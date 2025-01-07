@@ -1,0 +1,110 @@
+#This playbook deploy etcd culster
+
+- name: Deploying etcd cluster
+  hosts: etcd
+  become: yes
+  tasks:
+
+  - name: Installing archiving binaries via dnf
+    ansible.builtin.dnf:
+      name:
+        - tar
+        - unzip
+      state: latest
+    when: ansible_os_family == 'RedHat'
+
+  - name: Downloading etcd {{etcd_version}} archive
+    ansible.builtin.get_url:
+      url: https://github.com/etcd-io/etcd/releases/download/{{etcd_version}}/etcd-{{etcd_version}}-linux-amd64.tar.gz
+      dest: /tmp
+
+  - name: Extractring etcd binaries from archive
+    ansible.builtin.unarchive:
+      src: /tmp/etcd-{{etcd_version}}-linux-amd64.tar.gz
+      remote_src: true
+      dest: /usr/local/bin
+      extra_opts: ['--strip-components=1', '--show-stored-names']
+      include: 
+        - "etcd-{{etcd_version}}-linux-amd64/etcd"
+        - "etcd-{{etcd_version}}-linux-amd64/etcdctl"
+
+  - name: Change ownership of etcd binaries
+    ansible.builtin.file:
+      path: "{{ item }}"
+      state: file
+      owner: root
+      group: root
+      mode: 0755
+    with_items:
+      - /usr/local/bin/etcd
+      - /usr/local/bin/etcdctl
+
+  - name: Remove etcd archive
+    ansible.builtin.file:
+      path: /tmp/etcd-{{etcd_version}}-linux-amd64.tar.gz
+      state: absent
+
+  - name: Create etcd data directory
+    ansible.builtin.file:
+      path: /var/lib/etcd/{{ inventory_hostname }}.etcd
+      state: directory
+      owner: root
+      group: root
+      mode: 0700
+
+  - name: Create etcd config directory
+    ansible.builtin.file:
+      path: /etc/etcd/
+      state: directory
+      owner: root
+      group: root
+      mode: 0755
+
+  - name: Copying etcd config from template
+    ansible.builtin.template:
+      src: etcd.conf.yaml.j2
+      dest: /etc/etcd/etcd.conf.yaml
+      owner: root
+      group: root
+      mode: 0600
+
+  - name: Opening ports 2379-2380/TCP via Firewalld (on RHEL based distrs)
+    ansible.posix.firewalld:
+      port: 2379-2380/tcp
+      permanent: true
+      state: enabled
+    when: ansible_os_family == 'RedHat'
+
+  - name: Restart Firewalld
+    ansible.builtin.systemd_service:
+      name: firewalld.service
+      state: restarted
+
+  - name: Copyping etcd service file
+    ansible.builtin.copy:
+      src: etcd.service
+      dest: /etc/systemd/system/etcd.service
+      remote_src: False
+      owner: root
+      group: root
+      mode: 0644
+
+  - name: Starting etcd service on cluster nodes
+    ansible.builtin.systemd_service:
+      name: etcd.service
+      state: started
+      enabled: true
+      daemon_reload: true
+
+  - name: Wait 30 seconds for cluster up
+    ansible.builtin.pause:
+      seconds: 30
+  
+  - name: Check etcd member list
+    ansible.builtin.shell: |
+      /usr/local/bin/etcdctl --endpoints=http://{{ hostvars[inventory_hostname]['ansible_host'].split(':')[0] }}:2379 member list
+    register: etcd_members
+
+  - name: Print etcd members check results
+    ansible.builtin.debug: |
+      msg="{{ etcd_members.stdout }}"
